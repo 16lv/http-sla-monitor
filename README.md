@@ -1,5 +1,7 @@
 # API Health & SLA Monitor
 
+![CI Status](https://github.com/16lv/api-health-monitor/actions/workflows/ci.yml/badge.svg)
+
 An asynchronous HTTP endpoint availability and SLA latency monitoring tool built with **Python 3.12**, **FastAPI**, **httpx**, and **SQLite**.
 
 ## Overview
