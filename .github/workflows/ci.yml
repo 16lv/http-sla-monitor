@@ -9,6 +9,8 @@ on:
 jobs:
   test-and-lint:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: ".:src"
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.12
@@ -18,6 +20,6 @@ jobs:
       - name: Install dependencies
         run: pip install fastapi uvicorn httpx pydantic pytest pytest-asyncio ruff
       - name: Run Ruff linter
-        run: ruff check .
+        run: python -m ruff check .
       - name: Run pytest suite
-        run: pytest -v
+        run: python -m pytest -v

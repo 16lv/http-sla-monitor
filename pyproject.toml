@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "api-health-monitor"
-version = "1.0.0"
+version = "1.2.0"
 description = "Asynchronous HTTP endpoint monitoring, SLA latency percentile tracker, and FastAPI status service"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -24,7 +24,9 @@ dev = [
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
+pythonpath = [".", "src"]
 testpaths = ["tests"]
+filterwarnings = ["ignore::DeprecationWarning"]
 
 [tool.ruff]
 line-length = 100
