@@ -36,7 +36,7 @@ class ProbeOutcome:
 
 
 class HealthStore:
-    """SQLite persistence layer for endpoint probe telemetry and SLA percentile rollups."""
+    # Stores target configs and probe results in SQLite so we can calculate uptime and percentiles.
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self.db_path = str(db_path)
@@ -203,7 +203,7 @@ async def execute_probe(
     target: TargetConfig,
     client: httpx.AsyncClient | None = None,
 ) -> ProbeOutcome:
-    """Executes an HTTP probe with retry support, latency timing, and payload assertions."""
+    # Allow passing in a custom AsyncClient so unit tests can use httpx.MockTransport offline
     own_client = client is None
     active_client = client or httpx.AsyncClient()
     attempts = 0
