@@ -1,6 +1,6 @@
-# API Health & SLA Monitor
+﻿# UpWatch
 
-![CI Status](https://github.com/16lv/api-health-monitor/actions/workflows/ci.yml/badge.svg)
+![CI Status](https://github.com/16lv/upwatch/actions/workflows/ci.yml/badge.svg)
 
 An asynchronous HTTP endpoint availability and SLA latency monitoring tool built with **Python 3.12**, **FastAPI**, **httpx**, and **SQLite**.
 
@@ -41,3 +41,4 @@ uvicorn src.api_monitor.api:app --reload --port 8000
 ruff check .
 pytest -v
 ```
+
