@@ -6,16 +6,16 @@ from src.api_monitor.engine import HealthStore, TargetConfig, execute_probe
 
 
 def create_app(store: HealthStore | None = None) -> FastAPI:
-    active_store = store or HealthStore("api_monitor.db")
+    active_store = store or HealthStore("upwatch.db")
     app = FastAPI(
-        title="API Health & SLA Monitor",
+        title="UpWatch — API Health & SLA Monitor",
         version="1.0.0",
         description="Endpoint availability monitor tracking HTTP status contracts, JSON schema keys, and p50/p95/p99 latency percentiles.",
     )
 
     @app.get("/health")
     def service_health() -> dict[str, str]:
-        return {"service": "api-health-monitor", "status": "ok"}
+        return {"service": "upwatch", "status": "ok"}
 
     @app.post("/targets", status_code=201)
     def register_target(target: TargetConfig) -> TargetConfig:
