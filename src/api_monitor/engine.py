@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import httpx
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl, field_validator
 
 
 class TargetConfig(BaseModel):
@@ -21,6 +22,14 @@ class TargetConfig(BaseModel):
     required_json_key: str | None = None
     timeout_seconds: float = Field(default=5.0, gt=0.1, le=30.0)
     retries: int = Field(default=1, ge=0, le=5)
+
+    @field_validator("name")
+    @classmethod
+    def normalize_name(cls, value: str) -> str:
+        cleaned = value.strip()
+        if len(cleaned) < 2:
+            raise ValueError("Target name must contain at least 2 non-whitespace characters.")
+        return cleaned
 
 
 @dataclass(frozen=True)
@@ -36,16 +45,21 @@ class ProbeOutcome:
 
 
 class HealthStore:
-    # Stores target configs and probe results in SQLite so we can calculate uptime and percentiles.
+    """Thread-safe SQLite repository for monitored endpoints and probe history."""
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self.db_path = str(db_path)
+        self._lock = threading.RLock()
         self._conn = sqlite3.connect(self.db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
+        if self.db_path != ":memory:":
+            self._conn.execute("PRAGMA journal_mode = WAL;")
+            self._conn.execute("PRAGMA busy_timeout = 5000;")
         self._init_schema()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def __enter__(self) -> Self:
         return self
@@ -54,114 +68,129 @@ class HealthStore:
         self.close()
 
     def _init_schema(self) -> None:
-        self._conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS targets (
-                name TEXT PRIMARY KEY,
-                url TEXT NOT NULL,
-                method TEXT NOT NULL,
-                expected_status INTEGER NOT NULL,
-                max_latency_ms REAL NOT NULL,
-                required_json_key TEXT,
-                timeout_seconds REAL NOT NULL,
-                retries INTEGER NOT NULL
-            );
+        with self._lock:
+            self._conn.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS targets (
+                    name TEXT PRIMARY KEY,
+                    url TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    expected_status INTEGER NOT NULL,
+                    max_latency_ms REAL NOT NULL,
+                    required_json_key TEXT,
+                    timeout_seconds REAL NOT NULL,
+                    retries INTEGER NOT NULL
+                );
 
-            CREATE TABLE IF NOT EXISTS probe_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                target_name TEXT NOT NULL,
-                url TEXT NOT NULL,
-                checked_at TEXT NOT NULL,
-                status_code INTEGER,
-                latency_ms REAL NOT NULL,
-                healthy INTEGER NOT NULL,
-                failure_reason TEXT,
-                attempt_count INTEGER NOT NULL
-            );
+                CREATE TABLE IF NOT EXISTS probe_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    target_name TEXT NOT NULL,
+                    url TEXT NOT NULL,
+                    checked_at TEXT NOT NULL,
+                    status_code INTEGER,
+                    latency_ms REAL NOT NULL,
+                    healthy INTEGER NOT NULL,
+                    failure_reason TEXT,
+                    attempt_count INTEGER NOT NULL
+                );
 
-            CREATE INDEX IF NOT EXISTS idx_probe_target_time
-                ON probe_history(target_name, checked_at DESC);
-            """
+                CREATE INDEX IF NOT EXISTS idx_probe_target_time
+                    ON probe_history(target_name, checked_at DESC);
+                """
+            )
+            self._conn.commit()
+
+    @staticmethod
+    def _row_to_target(row: sqlite3.Row) -> TargetConfig:
+        return TargetConfig(
+            name=row["name"],
+            url=row["url"],
+            method=row["method"],
+            expected_status=row["expected_status"],
+            max_latency_ms=row["max_latency_ms"],
+            required_json_key=row["required_json_key"],
+            timeout_seconds=row["timeout_seconds"],
+            retries=row["retries"],
         )
-        self._conn.commit()
 
     def upsert_target(self, target: TargetConfig) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO targets (
-                name, url, method, expected_status, max_latency_ms,
-                required_json_key, timeout_seconds, retries
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(name) DO UPDATE SET
-                url = excluded.url,
-                method = excluded.method,
-                expected_status = excluded.expected_status,
-                max_latency_ms = excluded.max_latency_ms,
-                required_json_key = excluded.required_json_key,
-                timeout_seconds = excluded.timeout_seconds,
-                retries = excluded.retries
-            """,
-            (
-                target.name,
-                str(target.url),
-                target.method,
-                target.expected_status,
-                target.max_latency_ms,
-                target.required_json_key,
-                target.timeout_seconds,
-                target.retries,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO targets (
+                    name, url, method, expected_status, max_latency_ms,
+                    required_json_key, timeout_seconds, retries
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(name) DO UPDATE SET
+                    url = excluded.url,
+                    method = excluded.method,
+                    expected_status = excluded.expected_status,
+                    max_latency_ms = excluded.max_latency_ms,
+                    required_json_key = excluded.required_json_key,
+                    timeout_seconds = excluded.timeout_seconds,
+                    retries = excluded.retries
+                """,
+                (
+                    target.name,
+                    str(target.url),
+                    target.method,
+                    target.expected_status,
+                    target.max_latency_ms,
+                    target.required_json_key,
+                    target.timeout_seconds,
+                    target.retries,
+                ),
+            )
+            self._conn.commit()
+
+    def get_target(self, name: str) -> TargetConfig | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM targets WHERE name = ?", (name,)
+            ).fetchone()
+            return self._row_to_target(row) if row is not None else None
 
     def list_targets(self) -> list[TargetConfig]:
-        rows = self._conn.execute("SELECT * FROM targets ORDER BY name ASC").fetchall()
-        return [
-            TargetConfig(
-                name=r["name"],
-                url=r["url"],
-                method=r["method"],
-                expected_status=r["expected_status"],
-                max_latency_ms=r["max_latency_ms"],
-                required_json_key=r["required_json_key"],
-                timeout_seconds=r["timeout_seconds"],
-                retries=r["retries"],
-            )
-            for r in rows
-        ]
+        with self._lock:
+            rows = self._conn.execute("SELECT * FROM targets ORDER BY name ASC").fetchall()
+            return [self._row_to_target(row) for row in rows]
 
     def record_outcome(self, outcome: ProbeOutcome) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO probe_history (
-                target_name, url, checked_at, status_code,
-                latency_ms, healthy, failure_reason, attempt_count
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                outcome.target_name,
-                outcome.url,
-                outcome.checked_at,
-                outcome.status_code,
-                outcome.latency_ms,
-                1 if outcome.healthy else 0,
-                outcome.failure_reason,
-                outcome.attempt_count,
-            ),
-        )
-        self._conn.commit()
+        with self._lock:
+            self._conn.execute(
+                """
+                INSERT INTO probe_history (
+                    target_name, url, checked_at, status_code,
+                    latency_ms, healthy, failure_reason, attempt_count
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    outcome.target_name,
+                    outcome.url,
+                    outcome.checked_at,
+                    outcome.status_code,
+                    outcome.latency_ms,
+                    1 if outcome.healthy else 0,
+                    outcome.failure_reason,
+                    outcome.attempt_count,
+                ),
+            )
+            self._conn.commit()
 
     def compute_target_summary(self, target_name: str, limit: int = 200) -> dict[str, Any]:
-        rows = self._conn.execute(
-            """
-            SELECT status_code, latency_ms, healthy, failure_reason, checked_at
-            FROM probe_history
-            WHERE target_name = ?
-            ORDER BY id DESC
-            LIMIT ?
-            """,
-            (target_name, limit),
-        ).fetchall()
+        if limit <= 0:
+            raise ValueError("limit must be a positive integer.")
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT status_code, latency_ms, healthy, failure_reason, checked_at
+                FROM probe_history
+                WHERE target_name = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (target_name, limit),
+            ).fetchall()
 
         if not rows:
             return {
@@ -266,6 +295,7 @@ async def execute_probe(
                 )
             except (httpx.HTTPError, ValueError) as exc:
                 elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                last_status = None
                 last_reason = f"{type(exc).__name__}: {exc}"
 
         return ProbeOutcome(

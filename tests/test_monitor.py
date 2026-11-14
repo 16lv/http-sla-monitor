@@ -138,3 +138,11 @@ def test_fastapi_target_registration_and_sla_percentile_summary() -> None:
 
     missing_resp = client.get("/targets/unknown-service/summary")
     assert missing_resp.status_code == 404
+
+    found = store.get_target("payments-gateway")
+    assert found is not None
+    assert found.name == "payments-gateway"
+    assert store.get_target("non-existent") is None
+
+    with pytest.raises(ValueError, match="positive integer"):
+        store.compute_target_summary("payments-gateway", limit=0)
