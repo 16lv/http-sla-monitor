@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Self
 
 import httpx
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 
 class TargetConfig(BaseModel):
@@ -25,11 +25,25 @@ class TargetConfig(BaseModel):
 
     @field_validator("name")
     @classmethod
-    def normalize_name(cls, value: str) -> str:
+    def normalise_name(cls, value: str) -> str:
         cleaned = value.strip()
         if len(cleaned) < 2:
             raise ValueError("Target name must contain at least 2 non-whitespace characters.")
         return cleaned
+
+    @field_validator("required_json_key")
+    @classmethod
+    def normalise_json_key(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = value.strip()
+        return cleaned or None
+
+    @model_validator(mode="after")
+    def check_head_body_contract(self) -> Self:
+        if self.method == "HEAD" and self.required_json_key is not None:
+            raise ValueError("HEAD requests have no response body; omit required_json_key.")
+        return self
 
 
 @dataclass(frozen=True)
@@ -144,9 +158,12 @@ class HealthStore:
             self._conn.commit()
 
     def get_target(self, name: str) -> TargetConfig | None:
+        clean_name = name.strip()
+        if not clean_name:
+            return None
         with self._lock:
             row = self._conn.execute(
-                "SELECT * FROM targets WHERE name = ?", (name,)
+                "SELECT * FROM targets WHERE name = ?", (clean_name,)
             ).fetchone()
             return self._row_to_target(row) if row is not None else None
 
@@ -154,6 +171,23 @@ class HealthStore:
         with self._lock:
             rows = self._conn.execute("SELECT * FROM targets ORDER BY name ASC").fetchall()
             return [self._row_to_target(row) for row in rows]
+
+    def delete_target(self, name: str) -> bool:
+        clean_name = name.strip()
+        if not clean_name:
+            return False
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM targets WHERE name = ?", (clean_name,)
+            )
+            if cur.rowcount == 0:
+                self._conn.commit()
+                return False
+            self._conn.execute(
+                "DELETE FROM probe_history WHERE target_name = ?", (clean_name,)
+            )
+            self._conn.commit()
+            return True
 
     def record_outcome(self, outcome: ProbeOutcome) -> None:
         with self._lock:
@@ -177,9 +211,41 @@ class HealthStore:
             )
             self._conn.commit()
 
+    def list_history(self, target_name: str, limit: int = 20) -> list[dict[str, Any]]:
+        if limit <= 0:
+            raise ValueError("limit must be a positive integer.")
+        clean_name = target_name.strip()
+        with self._lock:
+            rows = self._conn.execute(
+                """
+                SELECT id, target_name, url, checked_at, status_code,
+                       latency_ms, healthy, failure_reason, attempt_count
+                FROM probe_history
+                WHERE target_name = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (clean_name, limit),
+            ).fetchall()
+        return [
+            {
+                "id": int(r["id"]),
+                "target_name": r["target_name"],
+                "url": r["url"],
+                "checked_at": r["checked_at"],
+                "status_code": r["status_code"],
+                "latency_ms": float(r["latency_ms"]),
+                "healthy": bool(r["healthy"]),
+                "failure_reason": r["failure_reason"],
+                "attempt_count": int(r["attempt_count"]),
+            }
+            for r in rows
+        ]
+
     def compute_target_summary(self, target_name: str, limit: int = 200) -> dict[str, Any]:
         if limit <= 0:
             raise ValueError("limit must be a positive integer.")
+        clean_name = target_name.strip()
         with self._lock:
             rows = self._conn.execute(
                 """
@@ -189,12 +255,12 @@ class HealthStore:
                 ORDER BY id DESC
                 LIMIT ?
                 """,
-                (target_name, limit),
+                (clean_name, limit),
             ).fetchall()
 
         if not rows:
             return {
-                "target_name": target_name,
+                "target_name": clean_name,
                 "total_checks": 0,
                 "availability_pct": 0.0,
                 "p50_latency_ms": 0.0,
@@ -211,7 +277,7 @@ class HealthStore:
         latest = rows[0]
 
         return {
-            "target_name": target_name,
+            "target_name": clean_name,
             "total_checks": total,
             "availability_pct": round((healthy_count / total) * 100.0, 2),
             "p50_latency_ms": round(_percentile(latencies, 50), 2),
@@ -241,7 +307,6 @@ async def execute_probe(
     target: TargetConfig,
     client: httpx.AsyncClient | None = None,
 ) -> ProbeOutcome:
-    # Allow passing in a custom AsyncClient so unit tests can use httpx.MockTransport offline
     own_client = client is None
     active_client = client or httpx.AsyncClient()
     attempts = 0

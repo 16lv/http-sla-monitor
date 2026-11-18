@@ -1,36 +1,42 @@
 # http-sla-monitor
 
-Asynchronous HTTP endpoint health monitor and SLA latency tracker built with **FastAPI**, **HTTPX**, **Pydantic v2**, and **SQLite**.
+Asynchronous HTTP endpoint availability monitor and latency tracker built with **Python 3.12**, **FastAPI**, **HTTPX**, **Pydantic v2**, and **SQLite**.
 
-## Overview
+It checks registered web services on demand, verifies expected status codes, latency thresholds, and optional JSON keys, and records every probe in SQLite to report availability and interpolated `p50` / `p95` / `p99` response speeds.
 
-- **Target validation**: Targets declare expected HTTP status codes, request methods (`GET`, `HEAD`, `POST`), retry budgets, timeouts, SLA latency ceilings, and optional JSON payload keys via Pydantic `TargetConfig`.
-- **Async probe engine**: `execute_probe()` measures response latency with `time.perf_counter()`, checks HTTP status and SLA bounds, inspects JSON keys when configured, and accepts an injected `httpx.AsyncClient` for offline `httpx.MockTransport` testing.
-- **Latency percentiles**: `HealthStore.compute_target_summary()` calculates interpolated `p50`, `p95`, and `p99` latencies alongside availability percentages over indexed probe history.
-- **Thread-safe persistence**: Uses `threading.RLock`, WAL mode on file-backed SQLite databases, primary-key target lookups, and a FastAPI lifespan client.
+## Features
 
-## Structure
-
-```text
-http-sla-monitor/
-├── src/api_monitor/
-│   ├── engine.py       # Probe engine, percentile calculation, thread-safe HealthStore
-│   └── api.py          # FastAPI endpoints and AsyncClient lifespan management
-├── tests/
-│   └── test_monitor.py # MockTransport retry tests and API SLA summary tests
-├── pyproject.toml
-└── requirements.txt
-```
+- **Strict target rules**: `TargetConfig` normalises names and optional JSON keys, rejects `HEAD` targets configured to parse a JSON body, and checks retry and timeout bounds.
+- **Retry-capable async probes**: `execute_probe()` times requests with `time.perf_counter()`, retries transient HTTP errors or timeouts up to the configured budget, and accepts a custom `httpx.AsyncClient` for offline `MockTransport` testing.
+- **Latency percentiles & history**: `HealthStore` tracks recent checks in SQLite (with WAL mode enabled on disk) and computes availability plus `p50`, `p95`, and `p99` latencies without loading unbounded history.
+- **Lazy database opening**: Importing the FastAPI module does not create `.db` files until a request arrives; configure storage location via `HTTP_SLA_DB_PATH`.
 
 ## Endpoints
 
 | Method | Path | Description |
 | :--- | :--- | :--- |
-| `GET` | `/health` | Service liveness check (`{"service": "http-sla-monitor", "status": "ok"}`) |
-| `POST` | `/targets` | Register or update a monitored target (`201`) |
-| `GET` | `/targets` | List registered targets ordered by name |
-| `POST` | `/targets/{name}/probe` | Execute an on-demand probe and persist the outcome |
-| `GET` | `/targets/{name}/summary` | Return availability percentage and p50/p95/p99 latency summary |
+| `GET` | `/health` | Service status check (`{"service": "http-sla-monitor", "status": "ok"}`) |
+| `POST` | `/targets` | Register or update a monitored endpoint (`201`) |
+| `GET` | `/targets` | List registered targets sorted by name |
+| `DELETE` | `/targets/{name}` | Remove a target and its stored check history (`204`) |
+| `POST` | `/targets/{name}/probe` | Run an on-demand probe and persist the result |
+| `GET` | `/targets/{name}/history` | Fetch recent probe checks (`?limit=20`) |
+| `GET` | `/targets/{name}/summary` | Return availability percentage and latency percentiles (`?limit=200`) |
+
+## Usage Example
+
+```bash
+uvicorn src.api_monitor.api:app --reload
+```
+
+```bash
+curl -X POST http://127.0.0.1:8000/targets \
+  -H "Content-Type: application/json" \
+  -d '{"name":"api-health","url":"https://example.com/health","expected_status":200,"max_latency_ms":500}'
+
+curl -X POST http://127.0.0.1:8000/targets/api-health/probe
+curl "http://127.0.0.1:8000/targets/api-health/summary?limit=100"
+```
 
 ## Development
 
@@ -38,5 +44,4 @@ http-sla-monitor/
 pip install -e ".[dev]"
 ruff check .
 pytest -v
-uvicorn src.api_monitor.api:app --reload
 ```

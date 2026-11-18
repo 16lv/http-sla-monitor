@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query, Response
 
 from src.api_monitor.engine import HealthStore, TargetConfig, execute_probe
 
 
-def create_app(store: HealthStore | None = None) -> FastAPI:
+def create_app(store: HealthStore | None = None, db_path: str | None = None) -> FastAPI:
     owns_store = store is None
-    active_store = store or HealthStore("http_sla_monitor.db")
+    resolved_db_path = db_path or os.environ.get("HTTP_SLA_DB_PATH", "http_sla_monitor.db")
+    state: dict[str, HealthStore | None] = {"store": store}
+
+    def get_store() -> HealthStore:
+        current = state["store"]
+        if current is None:
+            current = HealthStore(resolved_db_path)
+            state["store"] = current
+        return current
 
     @asynccontextmanager
     async def lifespan(application: FastAPI) -> AsyncIterator[None]:
@@ -20,12 +29,13 @@ def create_app(store: HealthStore | None = None) -> FastAPI:
             yield
         finally:
             await application.state.http_client.aclose()
-            if owns_store:
-                active_store.close()
+            if owns_store and state["store"] is not None:
+                state["store"].close()
+                state["store"] = None
 
     app = FastAPI(
         title="HTTP SLA Monitor",
-        version="1.2.0",
+        version="1.3.0",
         description=(
             "Endpoint availability monitor tracking HTTP status codes, JSON response keys, "
             "and p50/p95/p99 latency percentiles."
@@ -39,15 +49,22 @@ def create_app(store: HealthStore | None = None) -> FastAPI:
 
     @app.post("/targets", status_code=201)
     def register_target(target: TargetConfig) -> TargetConfig:
-        active_store.upsert_target(target)
+        get_store().upsert_target(target)
         return target
 
     @app.get("/targets")
     def list_targets() -> list[TargetConfig]:
-        return active_store.list_targets()
+        return get_store().list_targets()
+
+    @app.delete("/targets/{name}", status_code=204)
+    def delete_target(name: str) -> Response:
+        if not get_store().delete_target(name):
+            raise HTTPException(status_code=404, detail=f"Target '{name}' not found")
+        return Response(status_code=204)
 
     @app.post("/targets/{name}/probe")
     async def trigger_probe(name: str) -> dict[str, object]:
+        active_store = get_store()
         target = active_store.get_target(name)
         if target is None:
             raise HTTPException(status_code=404, detail=f"Target '{name}' not found")
@@ -64,11 +81,25 @@ def create_app(store: HealthStore | None = None) -> FastAPI:
             "attempt_count": outcome.attempt_count,
         }
 
-    @app.get("/targets/{name}/summary")
-    def get_summary(name: str) -> dict[str, object]:
+    @app.get("/targets/{name}/history")
+    def get_history(
+        name: str,
+        limit: int = Query(default=20, ge=1, le=500),
+    ) -> list[dict[str, object]]:
+        active_store = get_store()
         if active_store.get_target(name) is None:
             raise HTTPException(status_code=404, detail=f"Target '{name}' not found")
-        return active_store.compute_target_summary(name)
+        return active_store.list_history(name, limit=limit)
+
+    @app.get("/targets/{name}/summary")
+    def get_summary(
+        name: str,
+        limit: int = Query(default=200, ge=1, le=5000),
+    ) -> dict[str, object]:
+        active_store = get_store()
+        if active_store.get_target(name) is None:
+            raise HTTPException(status_code=404, detail=f"Target '{name}' not found")
+        return active_store.compute_target_summary(name, limit=limit)
 
     return app
 

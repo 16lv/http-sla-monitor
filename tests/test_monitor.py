@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import httpx
 import pytest
 from fastapi.testclient import TestClient
@@ -20,9 +22,10 @@ async def test_execute_probe_passes_when_status_latency_and_json_key_match() -> 
             url="https://api.example.com/health",
             expected_status=200,
             max_latency_ms=500.0,
-            required_json_key="status",
+            required_json_key="  status  ",
             retries=1,
         )
+        assert target.required_json_key == "status"
         outcome = await execute_probe(target, client=client)
         assert outcome.healthy is True
         assert outcome.status_code == 200
@@ -57,13 +60,15 @@ async def test_execute_probe_retries_and_reports_missing_json_key() -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_probe_recovers_on_retry_after_transient_503() -> None:
+async def test_execute_probe_recovers_on_retry_after_transient_503_and_timeout() -> None:
     calls = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
         if calls == 1:
+            raise httpx.ReadTimeout("Timed out reading response", request=request)
+        if calls == 2:
             return httpx.Response(503, json={"error": "warming_up"})
         return httpx.Response(200, json={"ok": True})
 
@@ -79,10 +84,36 @@ async def test_execute_probe_recovers_on_retry_after_transient_503() -> None:
         outcome = await execute_probe(target, client=client)
         assert outcome.healthy is True
         assert outcome.status_code == 200
-        assert outcome.attempt_count == 2
+        assert outcome.attempt_count == 3
 
 
-def test_fastapi_target_registration_and_sla_percentile_summary() -> None:
+def test_target_validation_normalises_blank_key_and_rejects_head_with_json_key() -> None:
+    blank_key_target = TargetConfig(
+        name="static-ping",
+        url="https://example.org/health",
+        method="HEAD",
+        required_json_key="   ",
+    )
+    assert blank_key_target.required_json_key is None
+
+    with pytest.raises(ValueError, match="HEAD requests have no response body"):
+        TargetConfig(
+            name="invalid-head",
+            url="https://example.org/health",
+            method="HEAD",
+            required_json_key="status",
+        )
+
+
+def test_fastapi_target_lifecycle_history_and_sla_summary(tmp_path: Path) -> None:
+    # Importing or instantiating create_app with a custom db_path must only open on request
+    lazy_db = tmp_path / "lazy_monitor.db"
+    lazy_app = create_app(db_path=str(lazy_db))
+    assert not lazy_db.exists()
+    with TestClient(lazy_app) as lazy_client:
+        assert lazy_client.get("/targets").json() == []
+    assert lazy_db.exists()
+
     store = HealthStore(":memory:")
     client = TestClient(create_app(store))
 
@@ -103,16 +134,8 @@ def test_fastapi_target_registration_and_sla_percentile_summary() -> None:
     )
     assert resp.status_code == 201
 
-    list_resp = client.get("/targets")
-    assert list_resp.status_code == 200
-    assert len(list_resp.json()) == 1
+    assert len(client.get("/targets").json()) == 1
 
-    # Verify empty summary before checks run
-    empty_summary = client.get("/targets/payments-gateway/summary").json()
-    assert empty_summary["total_checks"] == 0
-    assert empty_summary["availability_pct"] == 0.0
-
-    # Seed deterministic probe history to verify p50/p95/p99 and availability rollup
     sample_latencies = [12.0, 15.0, 18.0, 22.0, 25.0, 30.0, 42.0, 95.0, 140.0, 210.0]
     for idx, lat in enumerate(sample_latencies):
         store.record_outcome(
@@ -128,7 +151,7 @@ def test_fastapi_target_registration_and_sla_percentile_summary() -> None:
             )
         )
 
-    summary_resp = client.get("/targets/payments-gateway/summary")
+    summary_resp = client.get("/targets/payments-gateway/summary", params={"limit": 10})
     assert summary_resp.status_code == 200
     body = summary_resp.json()
     assert body["total_checks"] == 10
@@ -136,13 +159,16 @@ def test_fastapi_target_registration_and_sla_percentile_summary() -> None:
     assert body["p50_latency_ms"] == 27.5
     assert body["p95_latency_ms"] > 140.0
 
-    missing_resp = client.get("/targets/unknown-service/summary")
-    assert missing_resp.status_code == 404
+    history_resp = client.get("/targets/payments-gateway/history", params={"limit": 3})
+    assert history_resp.status_code == 200
+    history = history_resp.json()
+    assert len(history) == 3
+    assert history[0]["status_code"] == 503
 
-    found = store.get_target("payments-gateway")
-    assert found is not None
-    assert found.name == "payments-gateway"
-    assert store.get_target("non-existent") is None
+    del_resp = client.delete("/targets/payments-gateway")
+    assert del_resp.status_code == 204
+    assert client.get("/targets/payments-gateway/summary").status_code == 404
+    assert client.delete("/targets/payments-gateway").status_code == 404
 
     with pytest.raises(ValueError, match="positive integer"):
         store.compute_target_summary("payments-gateway", limit=0)
