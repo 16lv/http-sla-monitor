@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import argparse
+import asyncio
+import json
 import math
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Self
@@ -376,3 +380,59 @@ async def execute_probe(
     finally:
         if own_client:
             await active_client.aclose()
+
+
+async def probe_targets_concurrently(
+    targets: Sequence[TargetConfig],
+    client: httpx.AsyncClient | None = None,
+    max_concurrency: int = 8,
+) -> list[ProbeOutcome]:
+    if max_concurrency <= 0:
+        raise ValueError("max_concurrency must be positive.")
+    if not targets:
+        return []
+
+    own_client = client is None
+    active_client = client or httpx.AsyncClient()
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def _run(target: TargetConfig) -> ProbeOutcome:
+        async with semaphore:
+            return await execute_probe(target, client=active_client)
+
+    try:
+        return list(await asyncio.gather(*(_run(t) for t in targets)))
+    finally:
+        if own_client:
+            await active_client.aclose()
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description="Run an HTTP SLA probe against an endpoint and print structured results."
+    )
+    parser.add_argument("url", help="Target HTTP/HTTPS URL to probe")
+    parser.add_argument("--name", default="cli-probe", help="Target label (default: cli-probe)")
+    parser.add_argument("--method", default="GET", choices=("GET", "HEAD", "POST"))
+    parser.add_argument("--expected-status", type=int, default=200)
+    parser.add_argument("--max-latency-ms", type=float, default=800.0)
+    parser.add_argument("--required-key", default=None, help="Optional JSON object key to verify")
+    parser.add_argument("--retries", type=int, default=1)
+    args = parser.parse_args(argv)
+
+    target = TargetConfig(
+        name=args.name,
+        url=args.url,
+        method=args.method,
+        expected_status=args.expected_status,
+        max_latency_ms=args.max_latency_ms,
+        required_json_key=args.required_key,
+        retries=args.retries,
+    )
+    outcome = asyncio.run(execute_probe(target))
+    print(json.dumps(asdict(outcome), indent=2))
+    return 0 if outcome.healthy else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

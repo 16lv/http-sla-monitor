@@ -6,8 +6,14 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from src.api_monitor.api import create_app
-from src.api_monitor.engine import HealthStore, ProbeOutcome, TargetConfig, execute_probe
+from api_monitor.api import create_app
+from api_monitor.engine import (
+    HealthStore,
+    ProbeOutcome,
+    TargetConfig,
+    execute_probe,
+    probe_targets_concurrently,
+)
 
 
 @pytest.mark.asyncio
@@ -172,3 +178,25 @@ def test_fastapi_target_lifecycle_history_and_sla_summary(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="positive integer"):
         store.compute_target_summary("payments-gateway", limit=0)
+
+
+@pytest.mark.asyncio
+async def test_concurrent_probe_batch_and_semaphore_validation() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/fail":
+            return httpx.Response(502)
+        return httpx.Response(200, json={"ok": True})
+
+    targets = [
+        TargetConfig(name="svc-ok", url="https://svc.example/ok", retries=0),
+        TargetConfig(name="svc-bad", url="https://svc.example/fail", retries=0),
+    ]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+        outcomes = await probe_targets_concurrently(targets, client=client, max_concurrency=2)
+
+    assert len(outcomes) == 2
+    assert outcomes[0].healthy is True
+    assert outcomes[1].healthy is False
+
+    with pytest.raises(ValueError, match="max_concurrency must be positive"):
+        await probe_targets_concurrently(targets, max_concurrency=0)

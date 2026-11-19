@@ -7,7 +7,12 @@ from contextlib import asynccontextmanager
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Response
 
-from src.api_monitor.engine import HealthStore, TargetConfig, execute_probe
+from api_monitor.engine import (
+    HealthStore,
+    TargetConfig,
+    execute_probe,
+    probe_targets_concurrently,
+)
 
 
 def create_app(store: HealthStore | None = None, db_path: str | None = None) -> FastAPI:
@@ -61,6 +66,37 @@ def create_app(store: HealthStore | None = None, db_path: str | None = None) -> 
         if not get_store().delete_target(name):
             raise HTTPException(status_code=404, detail=f"Target '{name}' not found")
         return Response(status_code=204)
+
+    @app.post("/targets/probe-all")
+    async def probe_all_targets() -> dict[str, object]:
+        active_store = get_store()
+        targets = active_store.list_targets()
+        if not targets:
+            return {"total": 0, "healthy": 0, "unhealthy": 0, "results": []}
+
+        client: httpx.AsyncClient | None = getattr(app.state, "http_client", None)
+        outcomes = await probe_targets_concurrently(targets, client=client)
+        for outcome in outcomes:
+            active_store.record_outcome(outcome)
+
+        healthy_count = sum(1 for item in outcomes if item.healthy)
+        return {
+            "total": len(outcomes),
+            "healthy": healthy_count,
+            "unhealthy": len(outcomes) - healthy_count,
+            "results": [
+                {
+                    "target_name": item.target_name,
+                    "checked_at": item.checked_at,
+                    "status_code": item.status_code,
+                    "latency_ms": item.latency_ms,
+                    "healthy": item.healthy,
+                    "failure_reason": item.failure_reason,
+                    "attempt_count": item.attempt_count,
+                }
+                for item in outcomes
+            ],
+        }
 
     @app.post("/targets/{name}/probe")
     async def trigger_probe(name: str) -> dict[str, object]:
