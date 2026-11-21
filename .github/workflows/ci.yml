@@ -9,17 +9,17 @@ on:
 jobs:
   test-and-lint:
     runs-on: ubuntu-latest
-    env:
-      PYTHONPATH: ".:src"
     steps:
       - uses: actions/checkout@v4
       - name: Set up Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: Install dependencies
-        run: pip install fastapi uvicorn httpx pydantic pytest pytest-asyncio ruff
+      - name: Install package and dev dependencies
+        run: pip install -e ".[dev]"
       - name: Run Ruff linter
-        run: python -m ruff check .
+        run: ruff check .
       - name: Run pytest suite
-        run: python -m pytest -v
+        run: pytest -v
+      - name: Verify CLI entrypoint
+        run: http-sla-monitor --help
