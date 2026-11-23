@@ -61,6 +61,12 @@ def create_app(store: HealthStore | None = None, db_path: str | None = None) -> 
     def list_targets() -> list[TargetConfig]:
         return get_store().list_targets()
 
+    @app.get("/targets/summary")
+    def list_all_summaries(
+        limit: int = Query(default=200, ge=1, le=5000),
+    ) -> list[dict[str, object]]:
+        return get_store().compute_all_summaries(limit=limit)
+
     @app.delete("/targets/{name}", status_code=204)
     def delete_target(name: str) -> Response:
         if not get_store().delete_target(name):

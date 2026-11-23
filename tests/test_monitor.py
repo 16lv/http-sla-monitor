@@ -200,3 +200,31 @@ async def test_concurrent_probe_batch_and_semaphore_validation() -> None:
 
     with pytest.raises(ValueError, match="max_concurrency must be positive"):
         await probe_targets_concurrently(targets, max_concurrency=0)
+
+
+def test_list_all_target_summaries_returns_sorted_rollups() -> None:
+    store = HealthStore(":memory:")
+    client = TestClient(create_app(store))
+
+    for name, url in [("zeta-api", "https://zeta.example/h"), ("alpha-api", "https://alpha.example/h")]:
+        assert client.post("/targets", json={"name": name, "url": url}).status_code == 201
+
+    store.record_outcome(
+        ProbeOutcome(
+            target_name="alpha-api",
+            url="https://alpha.example/h",
+            checked_at="2026-11-23T12:00:00Z",
+            status_code=200,
+            latency_ms=19.4,
+            healthy=True,
+            failure_reason=None,
+            attempt_count=1,
+        )
+    )
+
+    resp = client.get("/targets/summary")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert [row["target_name"] for row in body] == ["alpha-api", "zeta-api"]
+    assert body[0]["availability_pct"] == 100.0
+    assert body[1]["total_checks"] == 0

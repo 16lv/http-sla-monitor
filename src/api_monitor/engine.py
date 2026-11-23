@@ -292,6 +292,12 @@ class HealthStore:
             "last_failure_reason": latest["failure_reason"],
         }
 
+    def compute_all_summaries(self, limit: int = 200) -> list[dict[str, Any]]:
+        return [
+            self.compute_target_summary(target.name, limit=limit)
+            for target in self.list_targets()
+        ]
+
 
 def _percentile(sorted_values: list[float], pct: float) -> float:
     if not sorted_values:

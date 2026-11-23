@@ -34,6 +34,7 @@ pip install -e ".[dev]"
 | `GET` | `/health` | Service status check (`{"service": "http-sla-monitor", "status": "ok"}`) |
 | `POST` | `/targets` | Register or update a monitored endpoint (`201`) |
 | `GET` | `/targets` | List registered targets sorted by name |
+| `GET` | `/targets/summary` | Return availability and latency rollups across all targets |
 | `DELETE` | `/targets/{name}` | Remove a target and its stored check history (`204`) |
 | `POST` | `/targets/probe-all` | Probe all registered targets concurrently and persist results |
 | `POST` | `/targets/{name}/probe` | Run an on-demand probe for one target |
