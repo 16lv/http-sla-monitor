@@ -351,7 +351,13 @@ async def execute_probe(
                     continue
 
                 if target.required_json_key:
-                    payload = response.json()
+                    try:
+                        payload = response.json()
+                    except ValueError:
+                        last_reason = (
+                            f"Expected JSON response containing '{target.required_json_key}', got non-JSON body"
+                        )
+                        continue
                     if not isinstance(payload, dict) or target.required_json_key not in payload:
                         last_reason = (
                             f"Missing required JSON key '{target.required_json_key}' in response"

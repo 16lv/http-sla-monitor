@@ -9,10 +9,23 @@ from fastapi import FastAPI, HTTPException, Query, Response
 
 from api_monitor.engine import (
     HealthStore,
+    ProbeOutcome,
     TargetConfig,
     execute_probe,
     probe_targets_concurrently,
 )
+
+
+def _serialize_outcome(outcome: ProbeOutcome) -> dict[str, object]:
+    return {
+        "target_name": outcome.target_name,
+        "checked_at": outcome.checked_at,
+        "status_code": outcome.status_code,
+        "latency_ms": outcome.latency_ms,
+        "healthy": outcome.healthy,
+        "failure_reason": outcome.failure_reason,
+        "attempt_count": outcome.attempt_count,
+    }
 
 
 def create_app(store: HealthStore | None = None, db_path: str | None = None) -> FastAPI:
@@ -67,6 +80,13 @@ def create_app(store: HealthStore | None = None, db_path: str | None = None) -> 
     ) -> list[dict[str, object]]:
         return get_store().compute_all_summaries(limit=limit)
 
+    @app.get("/targets/{name}")
+    def get_target(name: str) -> TargetConfig:
+        target = get_store().get_target(name)
+        if target is None:
+            raise HTTPException(status_code=404, detail=f"Target '{name}' not found")
+        return target
+
     @app.delete("/targets/{name}", status_code=204)
     def delete_target(name: str) -> Response:
         if not get_store().delete_target(name):
@@ -90,18 +110,7 @@ def create_app(store: HealthStore | None = None, db_path: str | None = None) -> 
             "total": len(outcomes),
             "healthy": healthy_count,
             "unhealthy": len(outcomes) - healthy_count,
-            "results": [
-                {
-                    "target_name": item.target_name,
-                    "checked_at": item.checked_at,
-                    "status_code": item.status_code,
-                    "latency_ms": item.latency_ms,
-                    "healthy": item.healthy,
-                    "failure_reason": item.failure_reason,
-                    "attempt_count": item.attempt_count,
-                }
-                for item in outcomes
-            ],
+            "results": [_serialize_outcome(item) for item in outcomes],
         }
 
     @app.post("/targets/{name}/probe")
@@ -113,15 +122,7 @@ def create_app(store: HealthStore | None = None, db_path: str | None = None) -> 
         client: httpx.AsyncClient | None = getattr(app.state, "http_client", None)
         outcome = await execute_probe(target, client=client)
         active_store.record_outcome(outcome)
-        return {
-            "target_name": outcome.target_name,
-            "checked_at": outcome.checked_at,
-            "status_code": outcome.status_code,
-            "latency_ms": outcome.latency_ms,
-            "healthy": outcome.healthy,
-            "failure_reason": outcome.failure_reason,
-            "attempt_count": outcome.attempt_count,
-        }
+        return _serialize_outcome(outcome)
 
     @app.get("/targets/{name}/history")
     def get_history(

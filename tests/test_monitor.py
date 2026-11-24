@@ -228,3 +228,24 @@ def test_list_all_target_summaries_returns_sorted_rollups() -> None:
     assert [row["target_name"] for row in body] == ["alpha-api", "zeta-api"]
     assert body[0]["availability_pct"] == 100.0
     assert body[1]["total_checks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_non_json_payload_preserves_status_and_get_single_target() -> None:
+    store = HealthStore(":memory:")
+    client = TestClient(create_app(store))
+
+    assert client.post(
+        "/targets",
+        json={"name": "web-root", "url": "https://example.org/html", "required_json_key": "ok", "retries": 0},
+    ).status_code == 201
+    assert client.get("/targets/web-root").json()["name"] == "web-root"
+    assert client.get("/targets/missing").status_code == 404
+
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, text="<html>not json</html>"))
+    async with httpx.AsyncClient(transport=transport) as mock_client:
+        outcome = await execute_probe(store.get_target("web-root"), client=mock_client)  # type: ignore[arg-type]
+
+    assert outcome.healthy is False
+    assert outcome.status_code == 200
+    assert "non-JSON" in (outcome.failure_reason or "")
